@@ -2,15 +2,12 @@ package builder_test
 
 import (
 	"bytes"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	mudf "github.com/mogaika/udf"
-
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/builder"
+	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/udf"
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/wim"
 )
 
@@ -178,11 +175,14 @@ func TestBuildISOBootOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	u := mudf.NewUdfFromReader(f)
-	if readUDFFile(t, u, []string{"sources", "boot.wim"}) == nil {
+	vol, err := udf.Read(f)
+	if err != nil {
+		t.Fatalf("udf.Read: %v", err)
+	}
+	if readUDFFile(t, vol, []string{"sources", "boot.wim"}) == nil {
 		t.Error("boot.wim missing")
 	}
-	if readUDFFile(t, u, []string{"sources", "install.wim"}) != nil {
+	if readUDFFile(t, vol, []string{"sources", "install.wim"}) != nil {
 		t.Error("install.wim should be absent for boot-only media")
 	}
 }
@@ -209,10 +209,13 @@ func TestBuildISOEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	u := mudf.NewUdfFromReader(f)
+	vol, err := udf.Read(f)
+	if err != nil {
+		t.Fatalf("udf.Read: %v", err)
+	}
 
-	bootWIM := readUDFFile(t, u, []string{"sources", "boot.wim"})
-	installWIM := readUDFFile(t, u, []string{"sources", "install.wim"})
+	bootWIM := readUDFFile(t, vol, []string{"sources", "boot.wim"})
+	installWIM := readUDFFile(t, vol, []string{"sources", "install.wim"})
 	if bootWIM == nil || installWIM == nil {
 		t.Fatal("boot.wim or install.wim missing from ISO")
 	}
@@ -238,28 +241,13 @@ func checkWIMImages(t *testing.T, data []byte, want int) {
 	}
 }
 
-func readUDFFile(t *testing.T, u *mudf.Udf, parts []string) []byte {
+// readUDFFile returns the file's bytes via the strict reader, or nil if any path
+// component is missing (some callers assert absence).
+func readUDFFile(t *testing.T, vol *udf.Volume, parts []string) []byte {
 	t.Helper()
-	entries := u.ReadDir(nil)
-	for i, part := range parts {
-		var found *mudf.File
-		for j := range entries {
-			if strings.EqualFold(entries[j].Name(), part) {
-				found = &entries[j]
-				break
-			}
-		}
-		if found == nil {
-			return nil
-		}
-		if i == len(parts)-1 {
-			data, err := io.ReadAll(found.NewReader())
-			if err != nil {
-				t.Fatal(err)
-			}
-			return data
-		}
-		entries = found.ReadDir()
+	data, err := vol.ReadFile(parts)
+	if err != nil {
+		return nil
 	}
-	return nil
+	return data
 }

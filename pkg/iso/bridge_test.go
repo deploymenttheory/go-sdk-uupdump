@@ -3,15 +3,12 @@ package iso_test
 import (
 	"bytes"
 	"encoding/binary"
-	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	mudf "github.com/mogaika/udf"
-
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/iso"
+	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/udf"
 )
 
 func writeFile(t *testing.T, root, rel string, content []byte) {
@@ -50,14 +47,21 @@ func TestBuildWindowsUDFBridge(t *testing.T) {
 		t.Error("missing El Torito boot record")
 	}
 
-	// UDF content reads back through the independent reader (VRS at sector 19).
+	// UDF content reads back through the strict reader (anchor at sector 256).
 	f, err := os.Open(out)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	u := mudf.NewUdfFromReader(f)
-	if got := readBridgeFile(t, u, []string{"sources", "install.wim"}); !bytes.Equal(got, install) {
+	vol, err := udf.Read(f)
+	if err != nil {
+		t.Fatalf("udf.Read: %v", err)
+	}
+	got, err := vol.ReadFile([]string{"sources", "install.wim"})
+	if err != nil {
+		t.Fatalf("read install.wim via UDF: %v", err)
+	}
+	if !bytes.Equal(got, install) {
 		t.Errorf("install.wim mismatch via UDF (%d bytes)", len(got))
 	}
 
@@ -97,28 +101,3 @@ func checkEntry(t *testing.T, raw, entry, want []byte, label string) {
 	}
 }
 
-func readBridgeFile(t *testing.T, u *mudf.Udf, parts []string) []byte {
-	t.Helper()
-	entries := u.ReadDir(nil)
-	for i, part := range parts {
-		var found *mudf.File
-		for j := range entries {
-			if strings.EqualFold(entries[j].Name(), part) {
-				found = &entries[j]
-				break
-			}
-		}
-		if found == nil {
-			t.Fatalf("not found: %s", part)
-		}
-		if i == len(parts)-1 {
-			data, err := io.ReadAll(found.NewReader())
-			if err != nil {
-				t.Fatal(err)
-			}
-			return data
-		}
-		entries = found.ReadDir()
-	}
-	return nil
-}

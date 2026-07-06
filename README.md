@@ -6,7 +6,7 @@
 ## Overview
 
 A pure-Go, cross-platform toolkit for **acquiring and building Windows
-installation media** — with no cgo and no external tools (no wimlib, DISM,
+installation media** — with no external tools (no wimlib, DISM,
 oscdimg, or cabextract). It provides four Go library areas plus a CLI:
 
 - **Windows Update service client** (`windowsuup/`) — makes direct SOAP calls to

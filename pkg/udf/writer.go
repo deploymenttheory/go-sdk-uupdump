@@ -72,8 +72,9 @@ func WriteTree(out io.WriterAt, srcDir string, opts Options) (*Result, error) {
 	}
 
 	// Phase 1: assign partition-relative logical blocks. Block 0 is the File Set
-	// Descriptor; everything else follows.
-	next := uint32(1)
+	// Descriptor, block 1 its Terminating Descriptor (Windows-good media always
+	// closes the FSD sequence with one); everything else follows.
+	next := uint32(2)
 	var uid uint64
 	assignBlocks(root, &next, &uid)
 	partitionBlocks := next
@@ -90,13 +91,14 @@ func WriteTree(out io.WriterAt, srcDir string, opts Options) (*Result, error) {
 		vrsStart:  vrs,
 		files:     map[string]Location{},
 	}
-	if err := w.writeVolumeStructures(partitionBlocks); err != nil {
+	numFiles, numDirs := countTree(root)
+	if err := w.writeVolumeStructures(partitionBlocks, numFiles, numDirs); err != nil {
 		return nil, err
 	}
 	if err := w.writeFileSet(root); err != nil {
 		return nil, err
 	}
-	if err := w.writeTree(root, ""); err != nil {
+	if err := w.writeTree(root, root.feBlock, ""); err != nil { // root's parent is itself
 		return nil, err
 	}
 
@@ -154,7 +156,23 @@ func (w *imageWriter) writeSector(sector uint64, data []byte) error {
 
 // writeVolumeStructures writes the VRS, anchor, main+reserve VDS, and integrity
 // descriptors.
-func (w *imageWriter) writeVolumeStructures(partitionBlocks uint32) error {
+// countTree counts the files and directories in the tree rooted at n (the root
+// directory itself counts as a directory), for the LVID's LVInformation.
+func countTree(n *node) (files, dirs uint32) {
+	if n.isDir {
+		dirs = 1
+	} else {
+		files = 1
+	}
+	for _, c := range n.children {
+		f, d := countTree(c)
+		files += f
+		dirs += d
+	}
+	return files, dirs
+}
+
+func (w *imageWriter) writeVolumeStructures(partitionBlocks, numFiles, numDirs uint32) error {
 	// Volume Recognition Sequence.
 	if err := w.writeSector(uint64(w.vrsStart), volStructDesc("BEA01")); err != nil {
 		return err
@@ -177,7 +195,7 @@ func (w *imageWriter) writeVolumeStructures(partitionBlocks uint32) error {
 			return err
 		}
 	}
-	return w.writeIntegrity(partitionBlocks)
+	return w.writeIntegrity(partitionBlocks, numFiles, numDirs)
 }
 
 func (w *imageWriter) writeVDS(base, partitionBlocks uint32) error {
@@ -197,8 +215,8 @@ func (w *imageWriter) writeVDS(base, partitionBlocks uint32) error {
 	return nil
 }
 
-func (w *imageWriter) writeIntegrity(partitionBlocks uint32) error {
-	if err := w.writeSector(lbnIntegrity, w.integrityDescriptor(partitionBlocks)); err != nil {
+func (w *imageWriter) writeIntegrity(partitionBlocks, numFiles, numDirs uint32) error {
+	if err := w.writeSector(lbnIntegrity, w.integrityDescriptor(partitionBlocks, numFiles, numDirs)); err != nil {
 		return err
 	}
 	return w.writeSector(lbnIntegrity+1, terminatingDescriptor(lbnIntegrity+1))
@@ -219,14 +237,20 @@ func (w *imageWriter) writeFileSet(root *node) error {
 	copy(fsd[400:], longAD(SectorSize, root.feBlock, 0)) // root directory ICB
 	copy(fsd[416:], domainEntityID())
 	putTag(fsd[:512], tagFileSet, 0) // partition LB 0
-	return w.writeSector(w.partStart+0, fsd)
+	if err := w.writeSector(w.partStart+0, fsd); err != nil {
+		return err
+	}
+	// Terminate the File Set Descriptor sequence at partition LB 1. Both
+	// Windows-good references (Microsoft, hdiutil) record one; without it the
+	// next sector holds a File Entry tag where UDFS expects the sequence to end.
+	return w.writeSector(w.partStart+1, terminatingDescriptor(1))
 }
 
 // writeTree writes each node's File Entry plus its data (file bytes or directory
 // FID list), recording each regular file's absolute location under prefix.
-func (w *imageWriter) writeTree(n *node, prefix string) error {
+func (w *imageWriter) writeTree(n *node, parentFE uint32, prefix string) error {
 	if n.isDir {
-		if err := w.writeDirEntry(n); err != nil {
+		if err := w.writeDirEntry(n, parentFE); err != nil {
 			return err
 		}
 		for _, c := range n.children {
@@ -234,7 +258,7 @@ func (w *imageWriter) writeTree(n *node, prefix string) error {
 			if prefix != "" {
 				child = prefix + "/" + c.name
 			}
-			if err := w.writeTree(c, child); err != nil {
+			if err := w.writeTree(c, n.feBlock, child); err != nil {
 				return err
 			}
 		}
@@ -246,13 +270,34 @@ func (w *imageWriter) writeTree(n *node, prefix string) error {
 	return w.writeFileEntry(n)
 }
 
-func (w *imageWriter) writeDirEntry(n *node) error {
-	// FID list: a parent entry plus one per child.
-	fid := make([]byte, 0, n.dataLen)
-	fid = appendFID(fid, n.dataLB, "", n.feBlock, true)
-	for _, c := range n.children {
-		fid = appendFID(fid, n.dataLB, c.name, c.feBlock, c.isDir)
+// fidEntry is one directory entry to emit as a File Identifier Descriptor.
+type fidEntry struct {
+	name string
+	fe   uint32 // child File Entry block
+	dir  bool
+}
+
+// dirFIDStream builds a directory's File Identifier Descriptor byte stream: the parent
+// entry ("") first, then one per child, packed contiguously. FIDs may cross logical-
+// block boundaries (as real Windows media does); baseLB is the directory's first data
+// block, used to stamp each FID's tag location (the block in which it begins).
+func dirFIDStream(ents []fidEntry, baseLB uint32) []byte {
+	var fid []byte
+	for _, e := range ents {
+		fid = appendFID(fid, baseLB, e.name, e.fe, e.dir)
 	}
+	return fid
+}
+
+func (w *imageWriter) writeDirEntry(n *node, parentFE uint32) error {
+	// The parent ("") FID references the PARENT directory's File Entry, not this
+	// directory's own — Windows UDFS validates this back-reference and rejects the
+	// volume ("Mismatch between parent FID and in-reference") if it points to self.
+	ents := []fidEntry{{"", parentFE, true}}
+	for _, c := range n.children {
+		ents = append(ents, fidEntry{c.name, c.feBlock, c.isDir})
+	}
+	fid := dirFIDStream(ents, n.dataLB)
 	for off := 0; off < len(fid); off += SectorSize {
 		end := min(off+SectorSize, len(fid))
 		sector := make([]byte, SectorSize)

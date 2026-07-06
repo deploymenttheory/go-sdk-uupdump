@@ -1,10 +1,18 @@
 package udf
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"fmt"
+)
 
 const (
 	fileTypeDirectory = 4
 	fileTypeRegular   = 5
+
+	// eaHeaderLen is the size of an Extended Attribute Header Descriptor; fileTimesEALen
+	// is the size of a File Times EA carrying a single 12-byte timestamp.
+	eaHeaderLen    = 24
+	fileTimesEALen = 32
 
 	// filePermsReadAll grants read+execute to owner/group/other.
 	filePermsReadAll = 0x14A5
@@ -50,28 +58,36 @@ func extentAD(length, location uint32) []byte {
 func (w *imageWriter) primaryVolumeDescriptor(loc uint32) []byte {
 	b := make([]byte, SectorSize)
 	le := binary.LittleEndian
-	le.PutUint32(b[16:], 1) // volume descriptor sequence number
+	le.PutUint32(b[16:], 0) // volume descriptor sequence number (0-based, like reference media)
 	le.PutUint32(b[20:], 0) // primary volume descriptor number
 	copy(b[24:], encodeDString(w.volumeID, 32))
 	le.PutUint16(b[56:], 1)                      // volume sequence number
 	le.PutUint16(b[58:], 1)                      // max volume sequence number
-	le.PutUint16(b[60:], 2)                      // interchange level
-	le.PutUint16(b[62:], 2)                      // max interchange level
-	le.PutUint32(b[64:], 1)                      // character set list
-	le.PutUint32(b[68:], 1)                      // max character set list
-	copy(b[72:], encodeDString(w.volumeID, 128)) // volume set identifier
+	le.PutUint16(b[60:], 2) // interchange level
+	le.PutUint16(b[62:], 3) // max interchange level
+	le.PutUint32(b[64:], 1) // character set list
+	le.PutUint32(b[68:], 1) // max character set list
+	// Volume Set Identifier: UDF 2.2.2.5 requires the first 16 characters to be unique,
+	// with the first 8 an ASCII-hex number. Windows UDFS.sys enforces this and rejects a
+	// volume ("the disk structure is corrupted and unreadable") whose set identifier is
+	// not so formed — even though Linux, macOS, and chkdsk accept it. Prefix a unique
+	// hex value (derived from the write time) ahead of the volume label.
+	setID := fmt.Sprintf("%08X%s", uint32(w.now.Unix()), w.volumeID)
+	copy(b[72:], encodeDString(setID, 128)) // volume set identifier
 	copy(b[200:], charSpec())                    // descriptor character set
 	copy(b[264:], charSpec())                    // explanatory character set
 	copy(b[376:], encodeTimestamp(w.now))
 	copy(b[388:], implEntityID())
-	putTag(b[:490], tagPrimaryVolume, loc)
+	// VDS descriptors are 512-byte structures (ECMA-167 part 3); Windows-good media
+	// (Microsoft, hdiutil) CRC the full 512 bytes, not just the populated prefix.
+	putTag(b[:512], tagPrimaryVolume, loc)
 	return b
 }
 
 func (w *imageWriter) implUseVolumeDescriptor(loc uint32) []byte {
 	b := make([]byte, SectorSize)
 	le := binary.LittleEndian
-	le.PutUint32(b[16:], 2) // volume descriptor sequence number
+	le.PutUint32(b[16:], 1) // volume descriptor sequence number
 	// Implementation identifier: the UDF LV Info entity.
 	suffix := make([]byte, 8)
 	le.PutUint16(suffix[0:], 0x0102) // UDF revision
@@ -88,7 +104,7 @@ func (w *imageWriter) implUseVolumeDescriptor(loc uint32) []byte {
 func (w *imageWriter) partitionDescriptor(loc, partitionBlocks uint32) []byte {
 	b := make([]byte, SectorSize)
 	le := binary.LittleEndian
-	le.PutUint32(b[16:], 3) // volume descriptor sequence number
+	le.PutUint32(b[16:], 2) // volume descriptor sequence number
 	le.PutUint16(b[20:], 1) // partition flags: allocated
 	le.PutUint16(b[22:], 0) // partition number
 	copy(b[24:], entityID("+NSR02", nil))
@@ -96,20 +112,22 @@ func (w *imageWriter) partitionDescriptor(loc, partitionBlocks uint32) []byte {
 	le.PutUint32(b[188:], lbnPartitionLB) // partition starting location (absolute)
 	le.PutUint32(b[192:], partitionBlocks)
 	copy(b[196:], implEntityID())
-	putTag(b[:356], tagPartition, loc)
+	putTag(b[:512], tagPartition, loc)
 	return b
 }
 
 func (w *imageWriter) logicalVolumeDescriptor(loc uint32) []byte {
 	b := make([]byte, SectorSize)
 	le := binary.LittleEndian
-	le.PutUint32(b[16:], 4) // volume descriptor sequence number
+	le.PutUint32(b[16:], 3) // volume descriptor sequence number
 	copy(b[20:], charSpec())
 	copy(b[84:], encodeDString(w.volumeID, 128))
 	le.PutUint32(b[212:], SectorSize) // logical block size
 	copy(b[216:], domainEntityID())
-	// LogicalVolumeContentsUse: long_ad to the File Set Descriptor at partition LB 0.
-	copy(b[248:], longAD(SectorSize, 0, 0))
+	// LogicalVolumeContentsUse: long_ad to the File Set Descriptor sequence at
+	// partition LB 0 — two blocks: the FSD plus its Terminating Descriptor,
+	// exactly like Microsoft install media.
+	copy(b[248:], longAD(2*SectorSize, 0, 0))
 	le.PutUint32(b[264:], 6) // map table length
 	le.PutUint32(b[268:], 1) // number of partition maps
 	copy(b[272:], implEntityID())
@@ -119,25 +137,28 @@ func (w *imageWriter) logicalVolumeDescriptor(loc uint32) []byte {
 	b[441] = 6
 	le.PutUint16(b[442:], 1) // volume sequence number
 	le.PutUint16(b[444:], 0) // partition number
+	// Unlike the fixed 512-byte VDS descriptors, reference media CRC the LVD over
+	// its exact recorded length (446 = 440 + one type-1 partition map).
 	putTag(b[:446], tagLogicalVolume, loc)
 	return b
 }
 
 func (w *imageWriter) unallocatedSpaceDescriptor(loc uint32) []byte {
 	b := make([]byte, SectorSize)
-	binary.LittleEndian.PutUint32(b[16:], 5) // volume descriptor sequence number
+	binary.LittleEndian.PutUint32(b[16:], 4) // volume descriptor sequence number
 	binary.LittleEndian.PutUint32(b[20:], 0) // number of allocation descriptors
+	// Reference media CRC the USD over its exact length (24), not the 512-byte frame.
 	putTag(b[:24], tagUnallocatedSpace, loc)
 	return b
 }
 
 func terminatingDescriptor(loc uint32) []byte {
 	b := make([]byte, SectorSize)
-	putTag(b[:16], tagTerminating, loc)
+	putTag(b[:512], tagTerminating, loc)
 	return b
 }
 
-func (w *imageWriter) integrityDescriptor(partitionBlocks uint32) []byte {
+func (w *imageWriter) integrityDescriptor(partitionBlocks, numFiles, numDirs uint32) []byte {
 	b := make([]byte, SectorSize)
 	le := binary.LittleEndian
 	copy(b[16:], encodeTimestamp(w.now))
@@ -146,10 +167,24 @@ func (w *imageWriter) integrityDescriptor(partitionBlocks uint32) []byte {
 	// LogicalVolumeContentsUse (32) @40: next unique id at [0:8].
 	le.PutUint64(b[40:], 16)              // next unique id (above those we assigned)
 	le.PutUint32(b[72:], 1)               // number of partitions
-	le.PutUint32(b[76:], 0)               // length of implementation use
-	le.PutUint32(b[80:], 0xFFFFFFFF)      // free space table: unknown
+	le.PutUint32(b[76:], 48)              // length of implementation use (LVInformation, padded to a 4-byte multiple like Microsoft media)
+	le.PutUint32(b[80:], 0)               // free space table: 0 (a mastered read-only volume is full)
 	le.PutUint32(b[84:], partitionBlocks) // size table
-	putTag(b[:88], tagLogicalVolumeInteg, lbnIntegrity)
+	// Implementation Use = the UDF "LVInformation" structure (UDF 2.2.6.4). It is
+	// REQUIRED: without it Windows UDFS rejects the whole volume as "corrupted and
+	// unreadable" (macOS and lenient readers tolerate its absence). It records the
+	// writer's EntityID, the file/directory counts, and the UDF revisions the volume
+	// conforms to (which is how Windows decides it can read the medium). Located after
+	// the per-partition free-space + size tables (8 bytes for the single partition).
+	iu := 80 + 8*1
+	copy(b[iu:], implEntityID())      // implementation identifier
+	le.PutUint32(b[iu+32:], numFiles) // number of files
+	le.PutUint32(b[iu+36:], numDirs)  // number of directories
+	le.PutUint16(b[iu+40:], 0x0102)   // minimum UDF read revision (1.02)
+	le.PutUint16(b[iu+42:], 0x0102)   // minimum UDF write revision (1.02)
+	le.PutUint16(b[iu+44:], 0x0102)   // maximum UDF write revision (1.02)
+	// 2 zero bytes @iu+46 pad the implementation use to 48 (Microsoft media does this).
+	putTag(b[:iu+48], tagLogicalVolumeInteg, lbnIntegrity)
 	return b
 }
 
@@ -167,9 +202,13 @@ func (w *imageWriter) fileEntry(n *node, fileType uint8) []byte {
 	le.PutUint32(b[36:], 0xFFFFFFFF) // uid: unset
 	le.PutUint32(b[40:], 0xFFFFFFFF) // gid: unset
 	le.PutUint32(b[44:], filePermsReadAll)
+	// File link count = number of FIDs that reference this ICB. A regular file has 1
+	// (its name in the parent). A directory has 1 (its name in the parent, or the root's
+	// own parent entry) plus one per subdirectory (each subdirectory's "" parent FID
+	// references this directory) — matching Microsoft/Apple UDF media.
 	linkCount := uint16(1)
 	if n.isDir {
-		linkCount = 2 + uint16(countChildDirs(n))
+		linkCount = 1 + uint16(countChildDirs(n))
 	}
 	le.PutUint16(b[48:], linkCount)
 
@@ -188,18 +227,40 @@ func (w *imageWriter) fileEntry(n *node, fileType uint8) []byte {
 	le.PutUint32(b[108:], 1) // checkpoint
 	copy(b[128:], implEntityID())
 	le.PutUint64(b[160:], n.uniqueID)
-	le.PutUint32(b[168:], 0) // length of extended attributes
 
-	// Allocation descriptors: the data occupies a contiguous run of logical
-	// blocks starting at n.dataLB, but a single short_ad cannot describe more
-	// than maxExtentLen bytes, so split the run into successive block-aligned
-	// extents (the final one carries the exact remaining byte count). All extents
-	// are type 0 (recorded and allocated): maxExtentLen keeps the top two bits of
-	// each length field clear. The descriptors fit comfortably in the File Entry
-	// (a >4 GiB install.wim needs only a handful).
-	contentLen := 176
+	// Extended Attributes: an EA Header Descriptor plus a File Times EA, on every File
+	// Entry — this is what real Windows media carries. Windows UDFS.sys requires the EA
+	// area and rejects a File Entry without one, failing the whole mount as "the disk
+	// structure is corrupted and unreadable"; Linux, macOS, and chkdsk all accept its
+	// absence, which is why it went unnoticed. The area sits between the File Entry
+	// header (176 bytes) and the allocation descriptors.
+	const eaLen = eaHeaderLen + fileTimesEALen // 24 + 32
+	// Extended Attribute Header Descriptor (ECMA-167 4/14.10.1): no implementation- or
+	// application-use attributes, so both locations point past the (recorded) File Times EA.
+	le.PutUint32(b[176+16:], eaLen)
+	le.PutUint32(b[176+20:], eaLen)
+	putTag(b[176:176+eaHeaderLen], tagExtendedAttrHeader, n.feBlock)
+	// File Times Extended Attribute (ECMA-167 4/14.10.5): one recorded timestamp.
+	ft := 176 + eaHeaderLen
+	le.PutUint32(b[ft:], 5)            // attribute type: File Times
+	b[ft+4] = 1                        // attribute subtype
+	le.PutUint32(b[ft+8:], fileTimesEALen) // attribute length
+	le.PutUint32(b[ft+12:], 12)        // data length: one 12-byte timestamp
+	le.PutUint32(b[ft+16:], 1)         // file time existence: creation time present
+	copy(b[ft+20:], encodeTimestamp(n.modTime))
+	le.PutUint32(b[168:], eaLen) // length of extended attributes
+
+	// Allocation descriptors follow the extended-attribute area. The data occupies a
+	// contiguous run of logical blocks starting at n.dataLB, but a single short_ad
+	// cannot describe more than maxExtentLen bytes, so split the run into successive
+	// block-aligned extents (the final one carries the exact remaining byte count). All
+	// extents are type 0 (recorded and allocated): maxExtentLen keeps the top two bits
+	// of each length field clear. The descriptors fit comfortably in the File Entry (a
+	// >4 GiB install.wim needs only a handful).
+	adStart := 176 + eaLen
+	contentLen := adStart
 	if infoLen > 0 {
-		adOff := 176
+		adOff := adStart
 		block := n.dataLB
 		remaining := infoLen
 		for remaining > 0 {
@@ -209,7 +270,7 @@ func (w *imageWriter) fileEntry(n *node, fileType uint8) []byte {
 			adOff += 8
 			remaining -= ext
 		}
-		le.PutUint32(b[172:], uint32(adOff-176)) // length of allocation descriptors
+		le.PutUint32(b[172:], uint32(adOff-adStart)) // length of allocation descriptors
 		contentLen = adOff
 	}
 	putTag(b[:contentLen], tagFileEntry, n.feBlock)
@@ -230,26 +291,15 @@ func countChildDirs(n *node) int {
 
 // dirFIDBytes returns the (block-boundary-padded) byte size of a directory's FID
 // list: a parent entry plus one entry per child.
+// dirFIDBytes is the total byte length of a directory's contiguously-packed FID list
+// (parent entry + one per child). FIDs are packed with no gap and may cross logical-
+// block boundaries, so this is a straight sum — matching dirFIDStream.
 func dirFIDBytes(n *node) uint32 {
-	lens := []int{fidLen("")}
+	off := fidLen("")
 	for _, c := range n.children {
-		lens = append(lens, fidLen(c.name))
-	}
-	off := 0
-	for _, l := range lens {
-		off = fidAdvance(off, l)
+		off += fidLen(c.name)
 	}
 	return uint32(off)
-}
-
-// fidAdvance returns the offset after placing a FID of length l at off, padding
-// to the next block first if the FID would cross a logical-block boundary (FIDs
-// may not span blocks).
-func fidAdvance(off, l int) int {
-	if off/SectorSize != (off+l-1)/SectorSize {
-		off = (off/SectorSize + 1) * SectorSize
-	}
-	return off + l
 }
 
 func fidLen(name string) int {
@@ -275,19 +325,17 @@ func dcharsLen(name string) int {
 	return 1 + 2*utf16Count(name)
 }
 
-// appendFID appends one File Identifier Descriptor to buf (padding to a block
-// boundary first if needed), referencing childFE. baseLB is the first logical
-// block of the FID extent (used to compute the per-FID tag location).
+// appendFID appends one File Identifier Descriptor to buf. FIDs are packed
+// CONTIGUOUSLY: a FID may span a logical-block boundary (this is what real Windows
+// media does — the directory data is one byte stream over the extent's contiguous
+// blocks), and the descriptor's tag location is the block in which it begins. The
+// earlier "avoid crossing" attempts were wrong: a zero-byte gap makes strict readers
+// (macOS) stop at an invalid tag, and Implementation-Use padding to fill the block
+// makes Windows reject the volume as corrupt. Contiguous packing is read correctly by
+// both.
 func appendFID(buf []byte, baseLB uint32, name string, childFE uint32, isDir bool) []byte {
 	dchars := encodeDChars(name)
-	l := fidLen(name)
-
-	if len(buf)/SectorSize != (len(buf)+l-1)/SectorSize {
-		pad := (len(buf)/SectorSize+1)*SectorSize - len(buf)
-		buf = append(buf, make([]byte, pad)...)
-	}
-
-	fid := make([]byte, l)
+	fid := make([]byte, fidLen(name))
 	le := binary.LittleEndian
 	le.PutUint16(fid[16:], 1) // file version number
 	var chars uint8
@@ -298,11 +346,11 @@ func appendFID(buf []byte, baseLB uint32, name string, childFE uint32, isDir boo
 		chars |= 0x02 // directory
 	}
 	fid[18] = chars
-	fid[19] = byte(len(dchars))
+	fid[19] = byte(len(dchars))                    // length of file identifier
 	copy(fid[20:], longAD(SectorSize, childFE, 0)) // ICB -> child File Entry
-	copy(fid[38:], dchars)
+	copy(fid[38:], dchars)                         // file identifier (no implementation use)
 
-	tagLoc := baseLB + uint32(len(buf)/SectorSize)
+	tagLoc := baseLB + uint32(len(buf)/SectorSize) // block in which this FID begins
 	putTag(fid, tagFileIdentifier, tagLoc)
 	return append(buf, fid...)
 }

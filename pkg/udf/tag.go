@@ -2,9 +2,9 @@
 // installation ISOs use so that files larger than the ISO9660 4 GiB limit fit.
 // It is paired with package iso to master a bootable UDF + El Torito image.
 //
-// The writer targets the subset of UDF that Windows and the read-only
-// github.com/mogaika/udf library accept: a single non-partitioned logical
-// volume, short allocation descriptors, and OSTA CS0 identifiers.
+// The writer targets the subset of UDF that Windows accepts (validated by the
+// strict reader in reader.go): a single non-partitioned logical volume, short
+// allocation descriptors, and OSTA CS0 identifiers.
 package udf
 
 import "encoding/binary"
@@ -28,6 +28,7 @@ const (
 	tagFileIdentifier       = 0x0101
 	tagAllocationExtent     = 0x0102
 	tagFileEntry            = 0x0105
+	tagExtendedAttrHeader   = 0x0106
 )
 
 // descriptorVersion is 2 for UDF 1.02 (the tag DescriptorVersion field).
@@ -59,7 +60,7 @@ func putTag(desc []byte, ident uint16, tagLocation uint32) {
 	le.PutUint16(desc[2:], descriptorVersion)
 	desc[4] = 0               // checksum, filled below
 	desc[5] = 0               // reserved
-	le.PutUint16(desc[6:], 1) // tag serial number
+	le.PutUint16(desc[6:], 0) // tag serial number (0, like Microsoft and hdiutil media)
 
 	crcLen := uint16(len(desc) - 16)
 	le.PutUint16(desc[8:], crcCCITT(desc[16:]))

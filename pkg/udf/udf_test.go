@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	mudf "github.com/mogaika/udf"
-
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/udf"
 )
 
@@ -25,7 +23,7 @@ func writeSrc(t *testing.T, root, rel string, content []byte) {
 }
 
 // TestWriteReadUDF writes a directory tree as a UDF image and reads it back with
-// the independent github.com/mogaika/udf reader as an oracle.
+// the strict reader (udf.Read) as the oracle.
 func TestWriteReadUDF(t *testing.T) {
 	src := t.TempDir()
 	files := map[string][]byte{
@@ -55,9 +53,15 @@ func TestWriteReadUDF(t *testing.T) {
 	}
 	defer f.Close()
 
-	u := mudf.NewUdfFromReader(f)
+	vol, err := udf.Read(f)
+	if err != nil {
+		t.Fatalf("udf.Read: %v", err)
+	}
 	for rel, want := range files {
-		got := readUDFFile(t, u, strings.Split(rel, "/"))
+		got, err := vol.ReadFile(strings.Split(rel, "/"))
+		if err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
 		if !bytes.Equal(got, want) {
 			t.Errorf("%s: content mismatch (%d vs %d bytes)", rel, len(got), len(want))
 		}
@@ -84,29 +88,3 @@ func TestWriteErrors(t *testing.T) {
 	}
 }
 
-// readUDFFile navigates the UDF tree by path components and returns file bytes.
-func readUDFFile(t *testing.T, u *mudf.Udf, parts []string) []byte {
-	t.Helper()
-	entries := u.ReadDir(nil)
-	for i, part := range parts {
-		var found *mudf.File
-		for j := range entries {
-			if entries[j].Name() == part {
-				found = &entries[j]
-				break
-			}
-		}
-		if found == nil {
-			t.Fatalf("path component %q not found", part)
-		}
-		if i == len(parts)-1 {
-			data, err := io.ReadAll(found.NewReader())
-			if err != nil {
-				t.Fatalf("read %q: %v", part, err)
-			}
-			return data
-		}
-		entries = found.ReadDir()
-	}
-	return nil
-}

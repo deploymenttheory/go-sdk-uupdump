@@ -2,7 +2,7 @@
 // ISO images. It parses the three on-disc structures that matter for a bootable
 // Windows install medium — the ISO9660 primary volume descriptor, the El Torito
 // boot catalog, and the UDF file system — and reports correctness problems that
-// keep media from booting even though lenient readers (macOS, mogaika) accept it.
+// keep media from booting even though lenient readers (e.g. macOS) accept it.
 //
 // Its headline check is the UDF allocation-descriptor validation: a file larger
 // than ~1 GiB (boot.wim, install.wim) must be split across several block-aligned

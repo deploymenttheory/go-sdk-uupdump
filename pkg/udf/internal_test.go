@@ -2,8 +2,58 @@ package udf
 
 import (
 	"encoding/binary"
+	"fmt"
 	"testing"
 )
+
+// TestDirFIDsContiguousNoGap is the regression guard for directory FID packing.
+// FIDs must be packed contiguously — a zero-byte gap before a block boundary makes
+// strict readers (Windows Setup, macOS) read a zero tag as end-of-directory and hide
+// every later entry (e.g. a >4 GiB install.wim). A FID MAY cross a logical-block
+// boundary: real Microsoft install media does this, and the earlier "pad to the next
+// block" behavior was itself rejected by Windows. This walks the raw FID stream for a
+// directory spanning several blocks and asserts: (1) every descriptor is a valid
+// FileIdentifier tag with a valid checksum+CRC (no zero-gap pad), (2) at least one FID
+// crosses a 2048-byte boundary (contiguous packing), (3) exactly the entries written
+// come back.
+func TestDirFIDsContiguousNoGap(t *testing.T) {
+	le := binary.LittleEndian
+	ents := []fidEntry{{"", 1, true}}
+	for i := range 300 { // varied-length names → FID list spans many blocks
+		ents = append(ents, fidEntry{fmt.Sprintf("entry%03d_padding_name_%d.dat", i, i%7), uint32(100 + i), i%5 == 0})
+	}
+	ents = append(ents, fidEntry{"install.wim", 99999, false})
+
+	stream := dirFIDStream(ents, 3)
+	if len(stream) < 3*SectorSize {
+		t.Fatalf("stream too small (%d bytes) to exercise multiple blocks", len(stream))
+	}
+
+	count, crossings := 0, 0
+	for off := 0; off < len(stream); {
+		if ident := le.Uint16(stream[off:]); ident != tagFileIdentifier {
+			t.Fatalf("descriptor at offset %d has tag %#x, want FileIdentifier %#x "+
+				"(zero-gap pad / misalignment — strict readers stop parsing here)", off, ident, tagFileIdentifier)
+		}
+		lFI := int(stream[off+19])
+		lIU := int(le.Uint16(stream[off+36:]))
+		flen := (38 + lIU + lFI + 3) / 4 * 4
+		if err := checkTagIntegrity(stream[off : off+flen]); err != nil {
+			t.Fatalf("FID #%d at offset %d: %v", count, off, err)
+		}
+		if off/SectorSize != (off+flen-1)/SectorSize {
+			crossings++
+		}
+		count++
+		off += flen
+	}
+	if count != len(ents) {
+		t.Fatalf("recovered %d FIDs, wrote %d", count, len(ents))
+	}
+	if crossings == 0 {
+		t.Fatal("no FID crosses a block boundary — stream is not packed contiguously")
+	}
+}
 
 // TestTagCRCChecksum verifies that putTag writes a self-consistent ECMA-167 tag:
 // the stored checksum and CRC match independent recomputation. The oracle reader
@@ -54,17 +104,6 @@ func TestCRCKnownVector(t *testing.T) {
 	}
 }
 
-func TestFidAdvanceBlockBoundary(t *testing.T) {
-	// A FID that would cross a block boundary is pushed to the next block.
-	if got := fidAdvance(SectorSize-10, 40); got != SectorSize+40 {
-		t.Errorf("fidAdvance across boundary = %d, want %d", got, SectorSize+40)
-	}
-	// One that fits stays in place.
-	if got := fidAdvance(100, 40); got != 140 {
-		t.Errorf("fidAdvance within block = %d, want 140", got)
-	}
-}
-
 // TestFileEntryLargeFileExtents verifies that a regular file larger than a
 // single short_ad's reach (boot.wim ~1.5 GiB, install.wim >4 GiB) is described
 // by multiple block-aligned extents, with an untruncated 64-bit information
@@ -100,8 +139,10 @@ func TestFileEntryLargeFileExtents(t *testing.T) {
 				t.Fatalf("alloc-desc bytes = %d (%d extents), want %d extents", adBytes, adBytes/8, wantExtents)
 			}
 
+			// Allocation descriptors start after the extended-attributes area.
+			adStart := 176 + int(le.Uint32(fe[168:]))
 			var sumLen, block uint64 = 0, startBlock
-			for off := 176; off < 176+int(adBytes); off += 8 {
+			for off := adStart; off < adStart+int(adBytes); off += 8 {
 				raw := le.Uint32(fe[off:])
 				if raw&0xC0000000 != 0 {
 					t.Errorf("extent at %d has non-zero type bits: %#x", off, raw)
