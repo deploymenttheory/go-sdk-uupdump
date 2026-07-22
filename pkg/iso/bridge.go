@@ -100,6 +100,11 @@ func writeISOBridge(out *os.File, volumeID string, totalSectors uint32, images [
 		return nil
 	}
 
+	catalog, err := bootCatalog(images)
+	if err != nil {
+		return err
+	}
+
 	for _, s := range []struct {
 		sector uint64
 		data   []byte
@@ -107,7 +112,7 @@ func writeISOBridge(out *os.File, volumeID string, totalSectors uint32, images [
 		{isoPVDSector, primaryVolumeDescriptor(volumeID, totalSectors)},
 		{isoBootRecSector, bootRecordDescriptor()},
 		{isoTermSector, terminatorDescriptor()},
-		{bootCatalogSector, bootCatalog(images)},
+		{bootCatalogSector, catalog},
 		{pathTableLSector, pathTable(binary.LittleEndian)},
 		{pathTableMSector, pathTable(binary.BigEndian)},
 		{rootDirSector, rootDirectoryExtent()},
@@ -216,7 +221,7 @@ func terminatorDescriptor() []byte {
 // bootCatalog builds the El Torito boot catalog: a validation entry, a default
 // (initial) entry for the first image, and a section header+entry per remaining
 // image.
-func bootCatalog(images []bootImage) []byte {
+func bootCatalog(images []bootImage) ([]byte, error) {
 	b := make([]byte, isoBlockSize)
 
 	// Validation entry.
@@ -232,7 +237,9 @@ func bootCatalog(images []bootImage) []byte {
 	binary.LittleEndian.PutUint16(b[28:], -sum)
 
 	// Default entry (first image).
-	putBootEntry(b[32:64], images[0])
+	if err := putBootEntry(b[32:64], images[0]); err != nil {
+		return nil, err
+	}
 
 	// Additional images as section headers + entries.
 	off := 64
@@ -244,18 +251,38 @@ func bootCatalog(images []bootImage) []byte {
 		b[off] = final
 		b[off+1] = images[i].platform
 		binary.LittleEndian.PutUint16(b[off+2:], 1) // one entry follows
-		putBootEntry(b[off+32:off+64], images[i])
+		if err := putBootEntry(b[off+32:off+64], images[i]); err != nil {
+			return nil, err
+		}
 		off += 64
 	}
-	return b
+	return b, nil
 }
 
-func putBootEntry(e []byte, img bootImage) {
+// putBootEntry writes one 32-byte El Torito section entry for img.
+//
+// The "sector count" is the number of 512-byte virtual sectors the firmware
+// loads. For a BIOS no-emulation entry, Microsoft/oscdimg record a fixed load
+// size (biosBootLoadSize = 8) for etfsboot.com regardless of the file's true
+// length; deriving it from the file length instead (the previous behaviour)
+// under-loads the boot sector. For UEFI the firmware reads the whole efisys.bin
+// FAT image, so the count must cover it. The field is 16-bit, so guard against
+// an image whose sector count would overflow it.
+func putBootEntry(e []byte, img bootImage) error {
 	e[0] = 0x88 // bootable
 	e[1] = 0x00 // no emulation
-	sectors := uint16((img.length + 511) / 512)
-	binary.LittleEndian.PutUint16(e[6:], sectors)
+	var sectors uint32
+	if img.platform == platformBIOS {
+		sectors = biosBootLoadSize
+	} else {
+		sectors = uint32((img.length + 511) / 512)
+	}
+	if sectors > 0xFFFF {
+		return fmt.Errorf("iso: boot image sector count %d exceeds the El Torito 16-bit limit (image too large)", sectors)
+	}
+	binary.LittleEndian.PutUint16(e[6:], uint16(sectors))
 	binary.LittleEndian.PutUint32(e[8:], uint32(img.sector))
+	return nil
 }
 
 // putStrPad copies s into dst, space-padding the remainder.

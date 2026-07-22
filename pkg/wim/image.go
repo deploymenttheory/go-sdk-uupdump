@@ -1,6 +1,7 @@
 package wim
 
 import (
+	"bytes"
 	"encoding/xml"
 	"fmt"
 	"unicode/utf16"
@@ -21,6 +22,13 @@ type ImageInfo struct {
 	FileCount        int64
 	TotalBytes       int64
 	Languages        []string
+	// WindowsXML is the verbatim "<WINDOWS>…</WINDOWS>" fragment from the source
+	// catalog (empty when the image has no <WINDOWS> element). It is carried
+	// loss-lessly through the writer so a rebuilt WIM keeps every Windows-specific
+	// property — INSTALLATIONTYPE, EDITIONID, ARCH, LANGUAGES, VERSION,
+	// SERVICINGDATA, WIMBOOT, etc. — that Windows Setup reads to select editions
+	// and detect WinPE. Without it, remastered media loses this metadata.
+	WindowsXML string
 }
 
 // Images returns the images described by the WIM's XML catalog.
@@ -52,6 +60,12 @@ type xmlWindows struct {
 	InstallationType string       `xml:"INSTALLATIONTYPE"`
 	ProductName      string       `xml:"PRODUCTNAME"`
 	Languages        xmlLanguages `xml:"LANGUAGES"`
+	// InnerXML captures every child of <WINDOWS> verbatim (including optional
+	// elements this struct does not name — VERSION, SERVICINGDATA, SYSTEMROOT,
+	// HAL, WIMBOOT). It is the loss-free escape hatch used to reconstruct the
+	// full fragment. The WIM XML <WINDOWS> element carries no attributes, so
+	// wrapping InnerXML in <WINDOWS>…</WINDOWS> reproduces it faithfully.
+	InnerXML []byte `xml:",innerxml"`
 }
 
 type xmlLanguages struct {
@@ -73,14 +87,25 @@ func (w *WIM) loadXML(_ int64) error {
 	}
 
 	w.xmlUTF8 = decodeUTF16(raw)
-	var doc xmlWIM
-	if err := xml.Unmarshal([]byte(w.xmlUTF8), &doc); err != nil {
-		return fmt.Errorf("wim: parse XML catalog: %w", err)
+	imgs, err := parseCatalog(w.xmlUTF8)
+	if err != nil {
+		return err
 	}
+	w.images = imgs
+	return nil
+}
 
-	w.images = make([]ImageInfo, 0, len(doc.Images))
+// parseCatalog unmarshals a UTF-8 WIM XML catalog into ImageInfo values,
+// capturing the verbatim <WINDOWS> fragment for loss-free re-emission. Shared by
+// the reader's loadXML and the in-place Updater.
+func parseCatalog(xmlUTF8 string) ([]ImageInfo, error) {
+	var doc xmlWIM
+	if err := xml.Unmarshal([]byte(xmlUTF8), &doc); err != nil {
+		return nil, fmt.Errorf("wim: parse XML catalog: %w", err)
+	}
+	out := make([]ImageInfo, 0, len(doc.Images))
 	for _, im := range doc.Images {
-		w.images = append(w.images, ImageInfo{
+		out = append(out, ImageInfo{
 			Index:            im.Index,
 			Name:             im.Name,
 			Description:      im.Description,
@@ -94,9 +119,20 @@ func (w *WIM) loadXML(_ int64) error {
 			FileCount:        im.FileCount,
 			TotalBytes:       im.TotalBytes,
 			Languages:        im.Windows.Languages.Language,
+			WindowsXML:       windowsFragment(im.Windows.InnerXML),
 		})
 	}
-	return nil
+	return out, nil
+}
+
+// windowsFragment reconstructs the verbatim "<WINDOWS>…</WINDOWS>" element from
+// the captured inner XML, or returns "" when the image carried no <WINDOWS>
+// element (inner content empty/whitespace only).
+func windowsFragment(inner []byte) string {
+	if len(bytes.TrimSpace(inner)) == 0 {
+		return ""
+	}
+	return "<WINDOWS>" + string(inner) + "</WINDOWS>"
 }
 
 // archName maps a WIM PROCESSOR_ARCHITECTURE code to a name.

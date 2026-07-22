@@ -40,10 +40,18 @@ type blobRec struct {
 
 // imageRec records a written image's metadata resource and catalog info.
 type imageRec struct {
-	metaOffset int64
-	metaSize   int64
-	metaHash   [20]byte
-	name       string
+	metaOffset  int64
+	metaSize    int64
+	metaHash    [20]byte
+	name        string
+	description string
+	displayName string
+	flags       string
+	// windowsXML is the verbatim "<WINDOWS>…</WINDOWS>" fragment to re-emit for
+	// this image (empty for images captured from a bare directory tree). Carried
+	// from the source catalog by AddImageFromWIM so INSTALLATIONTYPE/EDITIONID/
+	// ARCH/LANGUAGES survive a remaster.
+	windowsXML string
 	dirCount   int64
 	fileCount  int64
 	totalBytes int64
@@ -266,6 +274,40 @@ func (w *Writer) finalizeHeader(tableOffset, tableSize, xmlOffset, xmlSize int64
 	return nil
 }
 
+// serializeHeader reconstructs the 208-byte WIM header from a parsed header,
+// preserving every resource descriptor faithfully (compressed size, flags,
+// offset, and original size independently). It is the inverse of parseHeader and
+// is used by the Updater to rewrite the header after editing the catalog.
+func serializeHeader(h header) []byte {
+	le := binary.LittleEndian
+	b := make([]byte, headerSize)
+	copy(b, imageTag[:])
+	le.PutUint32(b[8:], headerSize) // cbSize
+	le.PutUint32(b[12:], h.Version)
+	le.PutUint32(b[16:], h.Flags)
+	le.PutUint32(b[20:], h.ChunkSize)
+	copy(b[24:40], h.GUID[:])
+	le.PutUint16(b[40:], h.PartNumber)
+	le.PutUint16(b[42:], h.TotalParts)
+	le.PutUint32(b[44:], h.ImageCount)
+	putResource(b[48:72], h.OffsetTable)
+	putResource(b[72:96], h.XMLData)
+	putResource(b[96:120], h.BootMetadata)
+	le.PutUint32(b[120:], h.BootIndex)
+	putResource(b[124:148], h.Integrity)
+	return b
+}
+
+// putResource writes a 24-byte resource descriptor: the low 56 bits of the first
+// word are the compressed size and the high 8 bits are flags, followed by the
+// 8-byte offset and 8-byte original size. Inverse of parseResource.
+func putResource(b []byte, rd resourceDescriptor) {
+	le := binary.LittleEndian
+	le.PutUint64(b[0:], uint64(rd.CompressedSize)&0x00FFFFFFFFFFFFFF|uint64(rd.Flags)<<56)
+	le.PutUint64(b[8:], uint64(rd.Offset))
+	le.PutUint64(b[16:], uint64(rd.OriginalSize))
+}
+
 // writeReshdr writes an uncompressed resource descriptor (size==originalSize,
 // no flags) into b.
 func writeReshdr(b []byte, offset, size int64) {
@@ -370,7 +412,10 @@ func encodeUTF16LE(s string) []byte {
 	return b
 }
 
-// buildXML produces the UTF-16LE (BOM-prefixed) WIM XML catalog.
+// buildXML produces the UTF-16LE (BOM-prefixed) WIM XML catalog. The per-image
+// element (including the preserved <WINDOWS> fragment) is built by
+// imageXMLElement in catalog.go so the same serialization is reused by the
+// in-place Updater.
 func buildXML(images []imageRec) []byte {
 	var total int64
 	for _, im := range images {
@@ -379,30 +424,10 @@ func buildXML(images []imageRec) []byte {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "<WIM><TOTALBYTES>%d</TOTALBYTES>", total)
 	for i, im := range images {
-		fmt.Fprintf(&sb, `<IMAGE INDEX="%d"><DIRCOUNT>%d</DIRCOUNT>`+
-			`<FILECOUNT>%d</FILECOUNT><TOTALBYTES>%d</TOTALBYTES>`+
-			`<NAME>%s</NAME><DESCRIPTION>%s</DESCRIPTION></IMAGE>`,
-			i+1, im.dirCount, im.fileCount, im.totalBytes, xmlEscape(im.name), xmlEscape(im.name))
+		sb.WriteString(imageXMLElement(i+1, im))
 	}
 	sb.WriteString("</WIM>")
 
 	out := []byte{0xFF, 0xFE} // UTF-16LE BOM
 	return append(out, encodeUTF16LE(sb.String())...)
-}
-
-func xmlEscape(s string) string {
-	r := []rune{}
-	for _, c := range s {
-		switch c {
-		case '&':
-			r = append(r, []rune("&amp;")...)
-		case '<':
-			r = append(r, []rune("&lt;")...)
-		case '>':
-			r = append(r, []rune("&gt;")...)
-		default:
-			r = append(r, c)
-		}
-	}
-	return string(r)
 }

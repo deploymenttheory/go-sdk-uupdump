@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/diskspace"
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/iso"
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/progress_counter"
+	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/unattend"
 	"github.com/deploymenttheory/go-sdk-winmediafoundry/pkg/wim"
 )
 
@@ -35,17 +37,93 @@ type Options struct {
 	// install. Keys are anchored and cleaned so they cannot escape the media root;
 	// intermediate directories are created as needed.
 	ExtraFiles map[string][]byte
+	// Bypass selects Windows 11 requirement-bypass mechanisms to apply while
+	// building the media. The zero value applies none.
+	Bypass Win11Bypass
+	// SkipSpaceCheck disables the pre-flight free-disk-space check.
+	SkipSpaceCheck bool
 }
+
+// Win11Bypass selects Windows 11 requirement-bypass mechanisms.
+type Win11Bypass struct {
+	// InstallationTypeServer sets WINDOWS/INSTALLATIONTYPE=Server on every image
+	// in install.wim, making Windows Setup skip the entire hardware appraisal
+	// (TPM/vTPM, Secure Boot, RAM, CPU) in one edit. This is the WinDiskWriter
+	// mechanism and needs no autounattend.
+	InstallationTypeServer bool
+	// LabConfig writes an autounattend.xml at the media root carrying the
+	// LabConfig registry keys that disable each Windows 11 check individually.
+	// A user-supplied autounattend.xml in ExtraFiles is respected and not
+	// overwritten (InstallationTypeServer still applies the bypass regardless).
+	LabConfig bool
+	// BypassNRO adds the OOBE\BypassNRO key to the generated autounattend.xml so
+	// first-boot OOBE does not require a network / Microsoft account.
+	BypassNRO bool
+}
+
+// Any reports whether any bypass mechanism is selected.
+func (b Win11Bypass) Any() bool {
+	return b.InstallationTypeServer || b.LabConfig || b.BypassNRO
+}
+
+// needsAutounattend reports whether a generated autounattend.xml is required.
+func (b Win11Bypass) needsAutounattend() bool { return b.LabConfig || b.BypassNRO }
 
 // BuildISO assembles a bootable Windows ISO at outISOPath from the ESD/WIM at
 // esdPath.
 func BuildISO(esdPath, outISOPath string, opts Options) error {
+	if !opts.SkipSpaceCheck {
+		if err := preflightSpace(esdPath, outISOPath, opts); err != nil {
+			return err
+		}
+	}
 	w, err := wim.Open(esdPath)
 	if err != nil {
 		return err
 	}
 	defer w.Close()
 	return BuildISOFromWIM(w, outISOPath, opts)
+}
+
+// preflightSpace fails fast when the work directory or the output volume lacks
+// room for the build. The rebuilt boot.wim + install.wim are, after LZX
+// recompression, roughly the size of the source ESD, and the ISO wraps them; the
+// source file size is therefore a sound estimate. Factors add headroom for the
+// extracted setup-media skeleton and filesystem overhead.
+func preflightSpace(esdPath, outISOPath string, opts Options) error {
+	info, err := os.Stat(esdPath)
+	if err != nil {
+		return fmt.Errorf("builder: %w", err)
+	}
+	src := uint64(info.Size())
+
+	workParent := opts.WorkDir
+	if workParent == "" {
+		workParent = os.TempDir()
+	}
+	outDir := filepath.Dir(outISOPath)
+
+	// The work dir holds the rebuilt WIMs plus the extracted media; the output
+	// volume holds the finished ISO. When both live on the same volume (the common
+	// case — e.g. a temp workdir and an output file both on C:), the two
+	// requirements are simultaneous, so they must be summed against that single
+	// volume's free space. Checking them independently would wrongly pass when
+	// each fits alone but their sum does not.
+	workNeed := src * 3 / 2
+	outNeed := src * 13 / 10
+	if diskspace.SameVolume(workParent, outDir) {
+		if err := diskspace.EnsureAvailable(workParent, workNeed+outNeed); err != nil {
+			return fmt.Errorf("builder: work dir and output share a volume: %w; point --workdir at a volume with more free space", err)
+		}
+		return nil
+	}
+	if err := diskspace.EnsureAvailable(workParent, workNeed); err != nil {
+		return fmt.Errorf("builder: work directory: %w", err)
+	}
+	if err := diskspace.EnsureAvailable(outDir, outNeed); err != nil {
+		return fmt.Errorf("builder: output: %w", err)
+	}
+	return nil
 }
 
 // imageClasses groups an ESD's images by role.
@@ -116,13 +194,37 @@ func BuildISOFromWIM(w *wim.WIM, outISOPath string, opts Options) error {
 	if err := buildWIM(w, classes.bootImages, filepath.Join(sources, "boot.wim"), wim.CompressionLZX, len(classes.bootImages), opts.Progress); err != nil {
 		return fmt.Errorf("builder: boot.wim: %w", err)
 	}
+	installWIM := filepath.Join(sources, "install.wim")
 	if len(classes.editions) > 0 {
-		if err := buildWIM(w, classes.editions, filepath.Join(sources, "install.wim"), wim.CompressionLZX, 0, opts.Progress); err != nil {
+		if err := buildWIM(w, classes.editions, installWIM, wim.CompressionLZX, 0, opts.Progress); err != nil {
 			return fmt.Errorf("builder: install.wim: %w", err)
+		}
+		// Mechanism A: edit install.wim so Setup skips the Win11 appraisal. The
+		// <WINDOWS> element the writer now preserves is what makes this possible.
+		if opts.Bypass.InstallationTypeServer {
+			progressf(opts.Progress, "Applying INSTALLATIONTYPE=Server bypass...\n")
+			if err := applyServerInstallationType(installWIM); err != nil {
+				return fmt.Errorf("builder: install.wim bypass: %w", err)
+			}
 		}
 	}
 
-	if err := injectExtraFiles(media, opts.ExtraFiles); err != nil {
+	// Mechanism B: stage a generated autounattend.xml carrying the LabConfig /
+	// BypassNRO registry keys (unless the caller already supplied one).
+	extras := opts.ExtraFiles
+	if opts.Bypass.needsAutounattend() {
+		autoXML, err := unattend.Generate(unattend.Config{
+			Architecture: unattendArch(w),
+			LabConfig:    opts.Bypass.LabConfig,
+			BypassNRO:    opts.Bypass.BypassNRO,
+		})
+		if err != nil {
+			return fmt.Errorf("builder: generate autounattend: %w", err)
+		}
+		extras = mergeExtras(opts.ExtraFiles, "autounattend.xml", autoXML)
+	}
+
+	if err := injectExtraFiles(media, extras); err != nil {
 		return fmt.Errorf("builder: inject extra files: %w", err)
 	}
 
@@ -131,6 +233,49 @@ func BuildISOFromWIM(w *wim.WIM, outISOPath string, opts Options) error {
 		return err
 	}
 	return nil
+}
+
+// applyServerInstallationType sets WINDOWS/INSTALLATIONTYPE=Server on every
+// image of the WIM at path (the Win11 hardware-appraisal bypass) and commits.
+func applyServerInstallationType(path string) error {
+	u, err := wim.OpenForUpdate(path)
+	if err != nil {
+		return err
+	}
+	defer u.Close()
+	if err := u.SetPropertyAll("WINDOWS/INSTALLATIONTYPE", "Server"); err != nil {
+		return err
+	}
+	return u.Commit()
+}
+
+// unattendArch maps the source images' WIM architecture to an autounattend
+// processorArchitecture, defaulting to amd64.
+func unattendArch(w *wim.WIM) string {
+	for _, im := range w.Images() {
+		switch im.Architecture {
+		case "x64":
+			return "amd64"
+		case "arm64":
+			return "arm64"
+		case "x86":
+			return "x86"
+		}
+	}
+	return "amd64"
+}
+
+// mergeExtras returns a copy of base with key=content added only when key is
+// absent, so a caller-supplied file (e.g. their own autounattend.xml) wins.
+func mergeExtras(base map[string][]byte, key string, content []byte) map[string][]byte {
+	out := make(map[string][]byte, len(base)+1)
+	for k, v := range base {
+		out[k] = v
+	}
+	if _, ok := out[key]; !ok {
+		out[key] = content
+	}
+	return out
 }
 
 // injectExtraFiles writes opts.ExtraFiles into the staged media tree (rooted at

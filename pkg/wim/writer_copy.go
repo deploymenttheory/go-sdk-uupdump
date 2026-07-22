@@ -28,6 +28,19 @@ func (w *Writer) AddImageFromWIM(src *WIM, index int, name string) error {
 	}
 
 	rec := imageRec{name: name}
+	// Preserve the source image's catalog metadata so a remaster keeps edition/
+	// arch/installation-type. The <WINDOWS> fragment is carried verbatim; without
+	// it Windows Setup loses edition selection and the INSTALLATIONTYPE=Server
+	// bypass has nothing to edit.
+	for _, im := range src.Images() {
+		if im.Index == index {
+			rec.description = im.Description
+			rec.displayName = im.DisplayName
+			rec.flags = im.Flags
+			rec.windowsXML = im.WindowsXML
+			break
+		}
+	}
 	var pending []*File // unique, not-yet-written blobs to copy, in tree order
 	inBatch := make(map[[20]byte]bool)
 	node := w.planNode(src, root, &rec, &pending, inBatch)

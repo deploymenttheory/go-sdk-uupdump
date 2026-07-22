@@ -82,6 +82,16 @@ func TestBuildWindowsUDFBridge(t *testing.T) {
 	// Default entry (BIOS) at offset 32, section entry (UEFI) at 96.
 	checkEntry(t, raw, cat[32:64], biosContent, "BIOS")
 	checkEntry(t, raw, cat[96:128], uefiContent, "UEFI")
+
+	// The BIOS entry records the fixed oscdimg load size of 8 virtual sectors,
+	// independent of etfsboot.com's actual 2 KiB length (which would otherwise
+	// derive 4). The UEFI entry must cover the whole efisys.bin.
+	if got := binary.LittleEndian.Uint16(cat[32+6:]); got != 8 {
+		t.Errorf("BIOS sector count = %d, want 8 (biosBootLoadSize)", got)
+	}
+	if got, want := binary.LittleEndian.Uint16(cat[96+6:]), uint16((len(uefiContent)+511)/512); got != want {
+		t.Errorf("UEFI sector count = %d, want %d", got, want)
+	}
 }
 
 const bootCatalogOffset = 22 * 2048
