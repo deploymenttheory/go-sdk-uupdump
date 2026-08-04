@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/deploymenttheory/go-sdk-winmediafoundry/compare/v0.7.0...v0.8.0) (2026-08-04)
+
+
+### Features
+
+* **isoinspect:** RetargetElToritoUEFI — point the boot catalog at another image file ([10cc766](https://github.com/deploymenttheory/go-sdk-winmediafoundry/commit/10cc766c2aed0f3adcedaa245b93e2a99cdd0420))
+* **isoinspect:** RetargetElToritoUEFI (UDF-aware) for no-prompt Windows boot media ([03f7d4a](https://github.com/deploymenttheory/go-sdk-winmediafoundry/commit/03f7d4a003d1aab09573dc7e15a95c075b41d1a4))
+
 ## [0.7.0](https://github.com/deploymenttheory/go-sdk-winmediafoundry/compare/v0.6.2...v0.7.0) (2026-07-22)
 
 
