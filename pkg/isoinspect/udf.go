@@ -27,6 +27,9 @@ type UDFFile struct {
 	Path    string
 	Size    int64
 	Extents int // number of allocation descriptors describing the data
+	// FirstExtentBlock is the partition-relative block of the first data
+	// extent (meaningful when Extents > 0; embedded files have none).
+	FirstExtentBlock uint32
 }
 
 // UDFInfo describes a parsed UDF file system.
@@ -185,7 +188,11 @@ func (w *udfWalker) walk(feBlock uint32, path string, depth int) {
 
 	// Regular file: validate its allocation descriptors.
 	w.validateFileExtents(path, infoLen, exts, embedded)
-	w.info.Files = append(w.info.Files, UDFFile{Path: path, Size: int64(infoLen), Extents: len(exts)})
+	f := UDFFile{Path: path, Size: int64(infoLen), Extents: len(exts)}
+	if len(exts) > 0 {
+		f.FirstExtentBlock = exts[0].block
+	}
+	w.info.Files = append(w.info.Files, f)
 }
 
 // validateFileExtents is the headline check: the allocation descriptors of a
