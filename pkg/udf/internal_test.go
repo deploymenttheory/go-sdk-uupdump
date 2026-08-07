@@ -56,7 +56,7 @@ func TestDirFIDsContiguousNoGap(t *testing.T) {
 }
 
 // TestTagCRCChecksum verifies that putTag writes a self-consistent ECMA-167 tag:
-// the stored checksum and CRC match independent recomputation. The oracle reader
+// the stored checksum and CRC match independent recomputation. The trusted source reader
 // does not validate these, so this guards Windows compatibility.
 func TestTagCRCChecksum(t *testing.T) {
 	desc := make([]byte, 64)

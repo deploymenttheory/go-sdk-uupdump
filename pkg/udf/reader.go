@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// This is a self-contained, deliberately STRICT UDF reader — the test oracle for the
+// This is a self-contained, deliberately STRICT UDF reader — the test trusted source for the
 // writer. It has no third-party dependency and validates every descriptor the way
 // ECMA-167 / Windows UDFS do (tag checksum + CRC + tag location, contiguously packed
 // File Identifier Descriptors with no zero-byte gaps, correct partition/File-Set

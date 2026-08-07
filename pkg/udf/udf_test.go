@@ -23,7 +23,7 @@ func writeSrc(t *testing.T, root, rel string, content []byte) {
 }
 
 // TestWriteReadUDF writes a directory tree as a UDF image and reads it back with
-// the strict reader (udf.Read) as the oracle.
+// the strict reader (udf.Read) as the trusted source.
 func TestWriteReadUDF(t *testing.T) {
 	src := t.TempDir()
 	files := map[string][]byte{

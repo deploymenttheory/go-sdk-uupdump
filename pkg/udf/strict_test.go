@@ -2,7 +2,7 @@ package udf
 
 // Corruption-matrix tests for the strict reader and error-injection tests for the
 // writer. Every mutation below models a defect class Windows UDFS rejects at mount
-// time; the strict reader must reject them too, or it is no oracle.
+// time; the strict reader must reject them too, or it is no trusted source.
 
 import (
 	"bytes"
