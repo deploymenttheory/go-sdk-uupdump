@@ -1,7 +1,9 @@
-[![Go Report Card](https://goreportcard.com/badge/github.com/deploymenttheory/go-sdk-winmediafoundry)](https://goreportcard.com/report/github.com/deploymenttheory/go-sdk-winmediafoundry)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/deploymenttheory/winmediafoundry)](https://github.com/deploymenttheory/go-sdk-winmediafoundry)
-![Status: Experimental](https://img.shields.io/badge/status-experimental-orange)
+[![GoDoc](https://pkg.go.dev/badge/github.com/deploymenttheory/go-sdk-winmediafoundry)](https://pkg.go.dev/github.com/deploymenttheory/go-sdk-winmediafoundry)
+[![License](https://img.shields.io/github/license/deploymenttheory/go-sdk-winmediafoundry)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/deploymenttheory/go-sdk-winmediafoundry)](https://go.dev/)
+[![Release](https://img.shields.io/github/v/release/deploymenttheory/go-sdk-winmediafoundry)](https://github.com/deploymenttheory/go-sdk-winmediafoundry/releases)
+[![codecov](https://codecov.io/gh/deploymenttheory/go-sdk-winmediafoundry/graph/badge.svg)](https://codecov.io/gh/deploymenttheory/go-sdk-winmediafoundry)
+![Status: preview](https://img.shields.io/badge/status-preview-blue)
 
 ## Overview
 
