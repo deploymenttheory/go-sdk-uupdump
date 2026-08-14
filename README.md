@@ -3,7 +3,7 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/deploymenttheory/go-sdk-winmediafoundry)](https://go.dev/)
 [![Release](https://img.shields.io/github/v/release/deploymenttheory/go-sdk-winmediafoundry)](https://github.com/deploymenttheory/go-sdk-winmediafoundry/releases)
 [![codecov](https://codecov.io/gh/deploymenttheory/go-sdk-winmediafoundry/graph/badge.svg)](https://codecov.io/gh/deploymenttheory/go-sdk-winmediafoundry)
-![Status: beta](https://img.shields.io/badge/status-beta-blue)
+![Status: preview](https://img.shields.io/badge/status-preview-blue)
 
 ## Overview
 
